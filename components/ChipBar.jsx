@@ -1,12 +1,9 @@
-'use client';
-
-export default function ChipBar({ categories, current, onChange }){
+export default function ChipBar() {
+  const chips = ["Все", "Балет", "Опера", "Драма", "Театр"];
   return (
-    <div className="chipbar">
-      {categories.map(cat => (
-        <button key={cat} className={"chip" + (current === cat ? " active" : "")} onClick={() => onChange(cat)}>
-          {cat}
-        </button>
+    <div className="row" style={{ overflowX: "auto", paddingBottom: 6 }}>
+      {chips.map((c) => (
+        <span className="chip" key={c}>{c}</span>
       ))}
     </div>
   );
