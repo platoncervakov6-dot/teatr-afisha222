@@ -1,16 +1,18 @@
 'use client';
 
 import { useEffect, useMemo, useState } from "react";
-import { EVENTS, CATEGORIES } from "@/lib/events";
 import EventCard from "@/components/EventCard";
 import ChipBar from "@/components/ChipBar";
+import { EVENTS as LOCAL_EVENTS, CATEGORIES } from "@/lib/events";
 
 export default function HomePage() {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("Все");
+  const [events, setEvents] = useState(LOCAL_EVENTS);
+  const [loading, setLoading] = useState(true);
 
+  // Телеграм-фолбэк (как было)
   useEffect(() => {
-    // Fallback для превью вне Telegram
     if (typeof window !== "undefined") {
       const w = window;
       if (!w.Telegram || !w.Telegram.WebApp) {
@@ -19,9 +21,7 @@ export default function HomePage() {
             colorScheme: "dark",
             themeParams: {},
             initDataUnsafe: {},
-            ready(){},
-            expand(){},
-            setHeaderColor(){},
+            ready(){}, expand(){}, setHeaderColor(){},
             openLink(url){ window.open(url, "_blank"); }
           }
         };
@@ -34,20 +34,35 @@ export default function HomePage() {
     }
   }, []);
 
+  // Подтягиваем агрегированные события с бэка
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        setLoading(true);
+        const res = await fetch("/api/events?limit=200", { cache: "no-store" });
+        const json = await res.json();
+        if (!cancelled && Array.isArray(json.events)) {
+          setEvents(json.events);
+        }
+      } catch (_) {
+        // молча оставим локальный фолбэк
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const list = useMemo(() => {
     const query = q.trim().toLowerCase();
-    return EVENTS.filter(ev => {
-      const inCat =
-        cat === "Все" ||
-        (ev.genres || []).some(g => g.toLowerCase() === cat.toLowerCase()) ||
-        ev.title.toLowerCase().includes(cat.toLowerCase());
-      const okQ =
-        !query ||
-        [ev.title, ev.theatre, ev.description, ...(ev.genres || [])]
-          .some(v => String(v).toLowerCase().includes(query));
+    return (events || []).filter(ev => {
+      const inCat = cat === "Все" || (ev.categories||[]).some(g => g.toLowerCase() === cat.toLowerCase());
+      const okQ = !query || [ev.title, ev.venue?.name, ev.description, ...(ev.categories||[])]
+        .some(v => String(v||"").toLowerCase().includes(query));
       return inCat && okQ;
-    });
-  }, [q, cat]);
+    }).sort((a,b) => new Date(a.dateStart) - new Date(b.dateStart));
+  }, [q, cat, events]);
 
   return (
     <div className="app">
@@ -62,14 +77,15 @@ export default function HomePage() {
       <ChipBar categories={CATEGORIES} current={cat} onChange={setCat} />
 
       <div className="grid">
-        {list.length === 0 ? (
+        {loading && <div className="empty">Загружаем события…</div>}
+        {!loading && list.length === 0 ? (
           <div className="empty">Ничего не найдено. Попробуйте изменить запрос или фильтр.</div>
-        ) : list.map(ev => <EventCard key={ev.id} ev={ev} />)}
+        ) : !loading && list.map(ev => <EventCard key={ev.id} ev={ev} />)}
       </div>
 
       <div className="footer">
-        Прототип мини-приложения. Данные фейковые для проверки UI. •{" "}
-        <a href="#" onClick={(e)=>{e.preventDefault(); alert('Москва Афиша — прототип Telegram Mini App. Сейчас показаны 2 фейк-мероприятия для проверки интерфейса.');}}>
+        Прототип мини-приложения. Источники: KudaGo (+ скоро Яндекс.Афиша, Ticketland, Kassir). •{" "}
+        <a href="#" onClick={(e)=>{e.preventDefault(); alert('Данные подтягиваются с сервера и кэшируются на 15 минут.');}}>
           о проекте
         </a>
       </div>
