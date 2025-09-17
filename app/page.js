@@ -1,18 +1,33 @@
 // app/page.js
-// Server Component (Next.js 13/14, app router)
-// Берём события из API: сначала из NEXT_PUBLIC_EVENTS_API (Cloudflare Worker),
-// иначе из локальной ручки /api/events
+// Страница всегда рендерится на запрос (без пререндеринга)
+export const dynamic = "force-dynamic";
 
 import EventCard from "../components/EventCard.jsx";
 import ChipBar from "../components/ChipBar.jsx";
 
 async function getEvents() {
-  const API = process.env.NEXT_PUBLIC_EVENTS_API || `${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/events`;
-  // limit можно увеличить — UI всё равно фильтрует
-  const res = await fetch(`${API}?limit=200`, { cache: "no-store" });
-  if (!res.ok) return [];
-  const data = await res.json().catch(() => ({ events: [] }));
-  return Array.isArray(data.events) ? data.events : [];
+  // 1) основной источник — Cloudflare Worker (если задан)
+  // 2) фолбэк — локальная ручка /api/events
+  const worker = process.env.NEXT_PUBLIC_EVENTS_API;
+  const local = "/api/events";
+  const urls = [worker, local].filter(Boolean).map(u => `${u}?limit=200`);
+
+  for (const url of urls) {
+    try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 8000); // таймаут 8с
+      const res = await fetch(url, { cache: "no-store", signal: controller.signal });
+      clearTimeout(id);
+      if (!res.ok) continue;
+      const data = await res.json().catch(() => null);
+      const list = data && Array.isArray(data.events) ? data.events : [];
+      if (list.length) return list;
+    } catch (_) {
+      // пробуем следующий источник
+    }
+  }
+
+  return []; // ни один источник не сработал — вернём пусто
 }
 
 export default async function Page() {
@@ -29,7 +44,9 @@ export default async function Page() {
 
       <div className="grid">
         {events.length === 0 ? (
-          <div className="empty">Пока ничего не нашли. Попробуйте позже.</div>
+          <div className="empty">
+            Ничего не нашли. Нажмите «Попробовать снова» или зайдите чуть позже.
+          </div>
         ) : (
           events.map((ev) => <EventCard key={ev.id} event={ev} />)
         )}
@@ -41,5 +58,4 @@ export default async function Page() {
     </div>
   );
 }
-
 
