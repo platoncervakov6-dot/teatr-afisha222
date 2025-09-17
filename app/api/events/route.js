@@ -11,9 +11,7 @@ export async function GET(req) {
   let list = [];
   try {
     list = await aggregateAll({ noCache: true });
-  } catch (_) {
-    list = [];
-  }
+  } catch {}
 
   if (type) list = list.filter(e => (e.categories || []).some(c => c.toLowerCase() === type));
   if (q) {
@@ -24,8 +22,5 @@ export async function GET(req) {
   list.sort((a, b) => new Date(a.dateStart) - new Date(b.dateStart));
   if (limit > 0) list = list.slice(0, limit);
 
-  return Response.json(
-    { events: list },
-    { headers: { "Cache-Control": "s-maxage=120, stale-while-revalidate=60" } }
-  );
+  return Response.json({ events: list }, { headers: { "Cache-Control": "s-maxage=120, stale-while-revalidate=60" } });
 }
