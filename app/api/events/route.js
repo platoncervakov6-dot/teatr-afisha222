@@ -2,20 +2,19 @@
 import { aggregateAll } from "@/lib/providers";
 import { NextResponse } from "next/server";
 
-export const revalidate = 900; // 15 минут кэш на уровне Next
+export const revalidate = 900; // 15 минут кэш ISR
 
 export async function GET(req) {
   const { searchParams } = new URL(req.url);
   const q = (searchParams.get("q") || "").trim().toLowerCase();
-  const type = (searchParams.get("type") || "").trim().toLowerCase(); // "балет" | "опера" | "драма" | "театр"
-  const dateFrom = searchParams.get("date_from"); // ISO
-  const dateTo = searchParams.get("date_to");     // ISO
+  const type = (searchParams.get("type") || "").trim().toLowerCase();
+  const dateFrom = searchParams.get("date_from");
+  const dateTo = searchParams.get("date_to");
   const limit = Number(searchParams.get("limit") || 0);
-  const noCache = searchParams.get("refresh") === "1"; // ?refresh=1 для принудительного обновления
+  const noCache = searchParams.get("refresh") === "1";
 
   const events = await aggregateAll({ city: "moscow", noCache });
 
-  // серверные фильтры (клиентские останутся как есть)
   let list = events.filter(ev => ev.citySlug === "moscow");
 
   if (q) {
@@ -41,9 +40,7 @@ export async function GET(req) {
     });
   }
 
-  // сортировка по дате
   list.sort((a, b) => new Date(a.dateStart) - new Date(b.dateStart));
-
   if (limit > 0) list = list.slice(0, limit);
 
   return NextResponse.json({ events: list }, { status: 200 });
