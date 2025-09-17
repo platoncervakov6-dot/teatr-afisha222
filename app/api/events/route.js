@@ -1,5 +1,4 @@
-// app/api/events/route.js
-export const dynamic = "force-dynamic"; // чтобы не пытался пререндерить
+export const dynamic = "force-dynamic";
 
 import { aggregateAll } from "../../../lib/providers/index.js";
 
@@ -9,7 +8,12 @@ export async function GET(req) {
   const type = (url.searchParams.get("type") || "").trim().toLowerCase();
   const q = (url.searchParams.get("q") || "").trim().toLowerCase();
 
-  let list = await aggregateAll({ noCache: true });
+  let list = [];
+  try {
+    list = await aggregateAll({ noCache: true });
+  } catch (_) {
+    list = [];
+  }
 
   if (type) list = list.filter(e => (e.categories || []).some(c => c.toLowerCase() === type));
   if (q) {
