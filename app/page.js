@@ -37,8 +37,14 @@ export default function HomePage() {
   const list = useMemo(() => {
     const query = q.trim().toLowerCase();
     return EVENTS.filter(ev => {
-      const inCat = cat === "Все" || (ev.genres||[]).some(g => g.toLowerCase() === cat.toLowerCase()) || ev.title.toLowerCase().includes(cat.toLowerCase());
-      const okQ = !query || [ev.title, ev.theatre, ev.description, ...(ev.genres||[])].some(v => String(v).toLowerCase().includes(query));
+      const inCat =
+        cat === "Все" ||
+        (ev.genres || []).some(g => g.toLowerCase() === cat.toLowerCase()) ||
+        ev.title.toLowerCase().includes(cat.toLowerCase());
+      const okQ =
+        !query ||
+        [ev.title, ev.theatre, ev.description, ...(ev.genres || [])]
+          .some(v => String(v).toLowerCase().includes(query));
       return inCat && okQ;
     });
   }, [q, cat]);
@@ -70,3 +76,4 @@ export default function HomePage() {
     </div>
   );
 }
+
