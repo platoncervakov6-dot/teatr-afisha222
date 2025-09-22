@@ -1,37 +1,14 @@
-export const runtime = 'edge'; // быстрый старт, можно убрать для node
+// app/api/events/route.js
+
+// Переводим на Node.js-рантайм для стабильности и логов
+export const runtime = 'nodejs';
 
 // ====== НАСТРОЙКИ КЭША ======
 const CACHE_TTL_MS = 15 * 60 * 1000; // 15 минут
-const KV_KEY = 'events_cache_v1';
-
-// Глобальный "процессный" кэш (живёт, пока живёт инстанс)
 const mem = globalThis.__AFISHA_CACHE__ ||= { data: null, ts: 0 };
 
-// --- если подключишь Vercel KV, раскомментируй эту функцию и ENV внизу ---
-// async function kvGetSet(newData) {
-//   const url = process.env.KV_REST_API_URL;
-//   const token = process.env.KV_REST_API_TOKEN;
-//   if (!url || !token) return null;
-//   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-//   if (newData === undefined) {
-//     const res = await fetch(`${url}/get/${KV_KEY}`, { headers, cache: 'no-store' });
-//     if (!res.ok) return null;
-//     const txt = await res.text();
-//     return txt ? JSON.parse(txt) : null;
-//   } else {
-//     await fetch(`${url}/set/${KV_KEY}`, {
-//       method: 'POST',
-//       headers,
-//       body: JSON.stringify(newData)
-//     });
-//     return newData;
-//   }
-// }
-
 // ====== УТИЛИТЫ ======
-function toISO(x) {
-  try { return new Date(x).toISOString(); } catch { return null; }
-}
+function toISO(x) { try { return new Date(x).toISOString(); } catch { return null; } }
 function normalize(e = {}) {
   return {
     id: String(e.id ?? e.sourceId ?? Math.random().toString(36).slice(2)),
@@ -58,17 +35,56 @@ function sortByDate(a, b) {
   return ax - bx;
 }
 
-// ====== ПРОВАЙДЕРЫ (минимально рабочие) ======
-// 1) KudaGo — берём публичный JSON API (Москва, театр/опера/балет/драма) — можно расширять фильтры.
-async function fromKudaGo(limit = 100) {
-  const categories = ['theatre', 'opera', 'ballet']; // базовые жанры
-  const url = `https://kudago.com/public-api/v1.4/events/?lang=ru&fields=id,dates,title,description,place,site_url,images,price,is_free&expand=place,dates&location=msk&text_format=text&categories=${categories.join(',')}&page_size=${limit}`;
+async function fetchJSON(url, { timeout = 10000, headers = {} } = {}) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const list = Array.isArray(data?.results) ? data.results : [];
-    return list.map((x) => normalize({
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        'accept': 'application/json',
+        // многие источники не любят пустой UA
+        'user-agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36',
+        ...headers,
+      },
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      console.warn('Upstream not ok:', res.status, url);
+      return null;
+    }
+    return await res.json().catch(() => null);
+  } catch (e) {
+    console.warn('Upstream fetch failed:', e?.name || e, url);
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// ====== ПРОВАЙДЕРЫ ======
+
+// 1) KudaGo (Москва). Берём базовые жанры, простой URL.
+async function fromKudaGo(limit = 100) {
+  const cats = ['theatre', 'opera', 'ballet'];
+  const url =
+    'https://kudago.com/public-api/v1.4/events/?' +
+    new URLSearchParams({
+      lang: 'ru',
+      location: 'msk',
+      categories: cats.join(','),
+      page_size: String(Math.min(limit, 200)),
+      fields:
+        'id,dates,title,description,place,site_url,images,price,is_free,categories',
+      expand: 'place,dates',
+      text_format: 'text',
+    }).toString();
+
+  const data = await fetchJSON(url);
+  const list = Array.isArray(data?.results) ? data.results : [];
+  return list.map((x) =>
+    normalize({
       id: x.id,
       source: 'kudago',
       sourceId: x.id,
@@ -78,18 +94,16 @@ async function fromKudaGo(limit = 100) {
       dateEnd: x.dates?.[0]?.end ? x.dates[0].end * 1000 : null,
       venue: x.place ? { name: x.place.title, address: x.place.address } : null,
       citySlug: 'moscow',
-      categories: x.categories || ['theatre'],
-      siteUrl: x.site_url,
-      buyUrl: x.site_url,
-      images: (x.images || []).map((i) => i.image),
-      priceFrom: x.is_free ? 0 : null
-    }));
-  } catch {
-    return [];
-  }
+      categories: Array.isArray(x.categories) ? x.categories : ['theatre'],
+      siteUrl: x.site_url || null,
+      buyUrl: x.site_url || null,
+      images: Array.isArray(x.images) ? x.images.map((i) => i.image) : [],
+      priceFrom: x.is_free ? 0 : null,
+    })
+  );
 }
 
-// 2) Заглушки под остальные источники (потом допишем)
+// Заглушки под остальные источники (добавим позже)
 async function fromYandexAfisha() { return []; }
 async function fromTicketland()   { return []; }
 async function fromKassir()       { return []; }
@@ -100,10 +114,9 @@ async function collectAll(limit = 300) {
     fromKudaGo(Math.min(200, limit)),
     fromYandexAfisha(),
     fromTicketland(),
-    fromKassir()
+    fromKassir(),
   ]);
   const all = chunks.flat().filter(Boolean);
-  // уникаем по id
   const map = new Map();
   for (const e of all) map.set(e.id, e);
   return Array.from(map.values()).sort(sortByDate);
@@ -115,36 +128,24 @@ export async function GET(req) {
   const force = searchParams.get('refresh') === '1';
   const limit = Math.max(1, Math.min(1000, Number(searchParams.get('limit')) || 300));
 
-  // 1) KV (если подключено)
-  // let kvData = null;
-  // if (!force) {
-  //   kvData = await kvGetSet(undefined);
-  //   if (kvData?.events?.length && (Date.now() - (kvData.updatedAt || 0) < CACHE_TTL_MS)) {
-  //     return Response.json({ events: kvData.events.slice(0, limit), updatedAt: kvData.updatedAt }, {
-  //       headers: corsHeaders()
-  //     });
-  //   }
-  // }
-
-  // 2) process memory cache
+  // Кэш в памяти процесса
   const freshMem = Date.now() - mem.ts < CACHE_TTL_MS;
   if (!force && mem.data && freshMem) {
-    return Response.json({ events: mem.data.slice(0, limit), updatedAt: mem.ts }, {
-      headers: corsHeaders()
-    });
+    return Response.json(
+      { events: mem.data.slice(0, limit), updatedAt: mem.ts },
+      { headers: corsHeaders() }
+    );
   }
 
-  // 3) собираем заново
+  // Собираем заново
   const events = await collectAll(limit);
   mem.data = events;
   mem.ts = Date.now();
 
-  // если KV подключено — запишем
-  // await kvGetSet({ events, updatedAt: mem.ts });
-
-  return Response.json({ events: events.slice(0, limit), updatedAt: mem.ts }, {
-    headers: corsHeaders()
-  });
+  return Response.json(
+    { events: events.slice(0, limit), updatedAt: mem.ts },
+    { headers: corsHeaders() }
+  );
 }
 
 function corsHeaders() {
@@ -152,10 +153,9 @@ function corsHeaders() {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
-    'Cache-Control': 'no-store'
+    'Cache-Control': 'no-store',
   };
 }
-
 export function OPTIONS() {
   return new Response(null, { headers: corsHeaders() });
 }
