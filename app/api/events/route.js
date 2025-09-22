@@ -1,4 +1,5 @@
 // app/api/events/route.js
+// Next.js App Router API — серверная функция (runtime: nodejs для fetch к внешним API)
 
 export const runtime = 'nodejs';
 
@@ -6,12 +7,12 @@ const CACHE_TTL_MS = 15 * 60 * 1000;
 const mem = globalThis.__AFISHA_CACHE__ ||= { data: null, ts: 0 };
 
 const nowSec = () => Math.floor(Date.now() / 1000);
-const toISO = (x) => { try { return new Date(x).toISOString(); } catch { return null; } };
+const toISO  = (x) => { try { return new Date(x).toISOString(); } catch { return null; } };
 
 function normalize(e = {}) {
   return {
     id: String(e.id ?? e.sourceId ?? Math.random().toString(36).slice(2)),
-    source: e.source || 'unknown',
+    source: e.source || 'kudago',
     sourceId: e.sourceId ?? null,
     title: e.title ?? '',
     description: e.description ?? '',
@@ -25,7 +26,7 @@ function normalize(e = {}) {
     images: Array.isArray(e.images) ? e.images : [],
     priceFrom: e.priceFrom ?? null,
     ageRestriction: e.ageRestriction ?? null,
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
   };
 }
 
@@ -35,7 +36,7 @@ function sortByDate(a, b) {
   return ax - bx;
 }
 
-async function fetchJSON(url, { timeout = 12000, headers = {} } = {}) {
+async function fetchJSON(url, { timeout = 15000, headers = {} } = {}) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeout);
   try {
@@ -49,9 +50,12 @@ async function fetchJSON(url, { timeout = 12000, headers = {} } = {}) {
         ...headers,
       },
     });
-    if (!res.ok) return { ok: false, status: res.status, data: null };
-    const data = await res.json().catch(() => null);
-    return { ok: true, status: res.status, data };
+    const textCT = res.headers.get('content-type') || '';
+    if (!res.ok) return { ok: false, status: res.status, data: null, ct: textCT };
+    const data = textCT.includes('application/json')
+      ? await res.json().catch(() => null)
+      : null;
+    return { ok: true, status: res.status, data, ct: textCT };
   } catch (e) {
     return { ok: false, status: 0, error: e?.name || String(e), data: null };
   } finally {
@@ -59,40 +63,49 @@ async function fetchJSON(url, { timeout = 12000, headers = {} } = {}) {
   }
 }
 
-/** Берём ближайшую будущую дату из массива KudaGo `dates` */
+/** Возвращает ближайшую будущую дату из массива `dates` (KudaGo), если она есть */
 function pickNextDate(dates) {
   if (!Array.isArray(dates)) return null;
   const now = nowSec();
   const future = dates
-    .map(d => ({ start: d?.start ?? null, end: d?.end ?? null }))
-    .filter(d => typeof d.start === 'number' && d.start >= now)
+    .map(d => ({
+      start: typeof d?.start === 'number' ? d.start : null,
+      end: typeof d?.end === 'number' ? d.end : null,
+    }))
+    .filter(d => d.start && d.start >= now)
     .sort((a, b) => a.start - b.start);
   return future[0] || null;
 }
 
-async function fromKudaGo(limit = 120, { withCategories = true } = {}) {
-  const categories = withCategories ? ['theatre', 'opera', 'ballet'] : null;
+/** Грузим страницу KudaGo с фильтрами по окну дат; возвращаем уже нормализованные события */
+async function fetchKudaGoPage({ page = 1, pageSize = 100, windowDays = 120, withCategories = true }) {
+  const since = nowSec(); // прямо сейчас
+  const until = since + windowDays * 24 * 3600;
 
   const params = new URLSearchParams({
     lang: 'ru',
     location: 'msk',
-    page_size: String(Math.min(limit, 200)),
-    actual_since: String(nowSec() - 3600), // небольшой запас назад
+    page: String(page),
+    page_size: String(Math.min(pageSize, 200)),
+    actual_since: String(since),
+    actual_until: String(until),
     order_by: 'dates',
     text_format: 'text',
     fields: 'id,title,description,place,site_url,images,dates,categories',
     expand: 'place,dates',
   });
-  if (categories) params.set('categories', categories.join(','));
+  if (withCategories) params.set('categories', ['theatre', 'opera', 'ballet'].join(','));
 
   const url = `https://kudago.com/public-api/v1.4/events/?${params.toString()}`;
   const { ok, status, data, error } = await fetchJSON(url);
 
   const rows = Array.isArray(data?.results) ? data.results : [];
-  // Маппим только те события, у которых нашли БУДУЩУЮ дату
+
   const events = rows.map((x) => {
+    // берём ближайшую будущую дату
     const nd = pickNextDate(x.dates);
-    if (!nd?.start) return null; // пропускаем прошедшие/без будущих дат
+    if (!nd?.start) return null;
+
     return normalize({
       id: x.id,
       source: 'kudago',
@@ -110,22 +123,44 @@ async function fromKudaGo(limit = 120, { withCategories = true } = {}) {
     });
   }).filter(Boolean);
 
-  return { ok, status, error, url, count: events.length, events };
+  return {
+    ok,
+    status,
+    error,
+    url,
+    count: events.length,
+    next: data?.next || null,
+    events,
+  };
 }
 
-async function collectAll(limit = 300) {
-  const a = await fromKudaGo(Math.min(limit, 200), { withCategories: true });
-  let events = a.events;
-
-  if (!events.length) {
-    const b = await fromKudaGo(Math.min(limit, 200), { withCategories: false });
-    events = b.events;
+/** Пагинация по KudaGo, пока не соберём лимит/пока есть next */
+async function collectFromKudaGo(limit = 300) {
+  const out = [];
+  let page = 1;
+  // Сначала — с категориями
+  while (out.length < limit) {
+    const { ok, events, next } = await fetchKudaGoPage({ page, withCategories: true });
+    if (!ok) break;
+    out.push(...events);
+    if (!next) break;
+    page += 1;
   }
-
-  // dedupe
+  // Если пусто — пробуем без фильтра категорий (некоторые типы событий странно размечены)
+  if (out.length === 0) {
+    page = 1;
+    while (out.length < limit) {
+      const { ok, events, next } = await fetchKudaGoPage({ page, withCategories: false });
+      if (!ok) break;
+      out.push(...events);
+      if (!next) break;
+      page += 1;
+    }
+  }
+  // dedupe + сортировка
   const map = new Map();
-  for (const e of events) map.set(e.id, e);
-  return Array.from(map.values()).sort(sortByDate);
+  for (const e of out) map.set(e.id, e);
+  return Array.from(map.values()).sort(sortByDate).slice(0, limit);
 }
 
 function corsHeaders() {
@@ -136,28 +171,27 @@ function corsHeaders() {
     'Cache-Control': 'no-store',
   };
 }
+
 export function OPTIONS() {
   return new Response(null, { headers: corsHeaders() });
 }
 
 export async function GET(req) {
   const { searchParams } = new URL(req.url);
-  const force = searchParams.get('refresh') === '1';
-  const debug = searchParams.get('debug') === '1';
-  const limit = Math.max(1, Math.min(1000, Number(searchParams.get('limit')) || 300));
+  const force  = searchParams.get('refresh') === '1';
+  const debug  = searchParams.get('debug') === '1';
+  const limit  = Math.max(1, Math.min(1000, Number(searchParams.get('limit')) || 300));
 
   if (debug) {
-    const a = await fromKudaGo(30, { withCategories: true });
-    const b = a.count ? a : await fromKudaGo(30, { withCategories: false });
-    return Response.json(
-      {
-        checkedAt: Date.now(),
-        tryWithCategories: { url: a.url, ok: a.ok, status: a.status, count: a.count, error: a.error || null },
-        tryWithoutCategories: { url: b.url, ok: b.ok, status: b.status, count: b.count, error: b.error || null },
-        sampleTitles: b.events.slice(0, 5).map((e) => e.title),
-      },
-      { headers: corsHeaders() }
-    );
+    // Диагностика: покажем две попытки
+    const a = await fetchKudaGoPage({ page: 1, withCategories: true });
+    const b = a.count ? a : await fetchKudaGoPage({ page: 1, withCategories: false });
+    return Response.json({
+      checkedAt: Date.now(),
+      tryWithCategories: { url: a.url, ok: a.ok, status: a.status, count: a.count, error: a.error || null },
+      tryWithoutCategories: { url: b.url, ok: b.ok, status: b.status, count: b.count, error: b.error || null },
+      sampleTitles: (b.events || []).slice(0, 8).map(e => e.title),
+    }, { headers: corsHeaders() });
   }
 
   const freshMem = Date.now() - mem.ts < CACHE_TTL_MS;
@@ -165,9 +199,10 @@ export async function GET(req) {
     return Response.json({ events: mem.data.slice(0, limit), updatedAt: mem.ts }, { headers: corsHeaders() });
   }
 
-  const events = await collectAll(limit);
+  const events = await collectFromKudaGo(limit);
   mem.data = events;
   mem.ts = Date.now();
 
   return Response.json({ events: events.slice(0, limit), updatedAt: mem.ts }, { headers: corsHeaders() });
 }
+
